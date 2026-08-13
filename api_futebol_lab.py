@@ -1,52 +1,56 @@
 
 import requests
 import streamlit as st
+import json
 
 # ============================================================
-# LABORATÓRIO API FUTEBOL — SÉRIE B
+# LABORATÓRIO API FUTEBOL — DIAGNÓSTICO DE RESPOSTA
 # ============================================================
-# Independente do Main.py.
-# Não altera o cache do Premium e não consulta API-Sports.
+# Versão diagnóstica: não altera o Main.py nem o cache.
+# Objetivo: descobrir a estrutura REAL retornada pela API.
 #
-# Configure no Streamlit Secrets:
-#
+# Secrets aceitos:
 # [api_futebol]
 # token = "SUA_CHAVE"
 #
-# Base documentada:
-# https://api.api-futebol.com.br/v1
-# Autenticação:
-# Authorization: Bearer TOKEN
+# ou:
+# API_FUTEBOL_TOKEN = "SUA_CHAVE"
 # ============================================================
 
 BASE_URL = "https://api.api-futebol.com.br/v1"
 
 st.set_page_config(
-    page_title="Laboratório API Futebol",
+    page_title="Diagnóstico API Futebol",
     page_icon="🧪",
     layout="wide",
 )
 
-st.title("🧪 Laboratório API Futebol")
-st.caption("Série B — teste independente antes da integração ao Premium")
+st.title("🧪 Diagnóstico API Futebol")
+st.caption("Descobrindo a resposta real da sua conta Free — Série B")
 
 def get_token():
     try:
         if "api_futebol" in st.secrets:
-            return st.secrets["api_futebol"].get("token")
+            token = st.secrets["api_futebol"].get("token")
+            if token:
+                return token
     except Exception:
         pass
 
     try:
-        return st.secrets.get("API_FUTEBOL_TOKEN")
+        token = st.secrets.get("API_FUTEBOL_TOKEN")
+        if token:
+            return token
     except Exception:
-        return None
+        pass
+
+    return None
 
 TOKEN = get_token()
 
 def api_get(path, params=None):
     if not TOKEN:
-        return None, "API_FUTEBOL_TOKEN não configurado nos Secrets."
+        return None, None, None, "Token não encontrado nos Secrets."
 
     try:
         r = requests.get(
@@ -56,325 +60,331 @@ def api_get(path, params=None):
                 "Authorization": f"Bearer {TOKEN}",
                 "Accept": "application/json",
             },
-            timeout=20,
+            timeout=25,
         )
 
-        if r.status_code == 401:
-            return None, "HTTP 401 — token inválido ou não autorizado."
-        if r.status_code == 403:
-            return None, "HTTP 403 — acesso negado/plano não liberou este recurso."
-        if r.status_code == 429:
-            return None, "HTTP 429 — limite de requisições atingido."
-        if not r.ok:
-            return None, f"HTTP {r.status_code}: {r.text[:800]}"
-
         try:
-            return r.json(), None
+            body = r.json()
         except Exception:
-            return None, "Resposta não-JSON."
+            body = r.text
+
+        headers = {
+            k: v for k, v in r.headers.items()
+            if k.lower() in {
+                "content-type",
+                "x-ratelimit-limit",
+                "x-ratelimit-remaining",
+                "x-ratelimit-reset",
+                "retry-after",
+            }
+        }
+
+        if not r.ok:
+            return body, r.status_code, headers, (
+                f"HTTP {r.status_code}"
+            )
+
+        return body, r.status_code, headers, None
 
     except Exception as e:
-        return None, str(e)
+        return None, None, None, str(e)
 
-def first_list(data, keys):
-    if not isinstance(data, dict):
-        return []
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, list):
-            return value
-    return []
+def walk(obj, path=""):
+    """Percorre recursivamente dict/list procurando textos relacionados."""
+    found = []
 
-def show_raw(label, data):
-    with st.expander(label):
-        st.json(data if data is not None else {})
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            current = f"{path}.{key}" if path else str(key)
+
+            key_text = str(key).lower()
+            if any(term in key_text for term in [
+                "campeonato", "league", "nome", "name", "serie"
+            ]):
+                found.append((current, value))
+
+            found.extend(walk(value, current))
+
+    elif isinstance(obj, list):
+        for i, value in enumerate(obj):
+            found.extend(walk(value, f"{path}[{i}]"))
+
+    elif isinstance(obj, str):
+        text = obj.lower()
+        if "série b" in text or "serie b" in text:
+            found.append((path, obj))
+
+    return found
+
+def extract_ids(obj, path=""):
+    """Procura objetos com campos que parecem IDs + nomes."""
+    results = []
+
+    if isinstance(obj, dict):
+        keys_lower = {str(k).lower(): k for k in obj.keys()}
+
+        id_key = next(
+            (keys_lower[k] for k in ["id", "campeonato_id", "league_id"]
+             if k in keys_lower),
+            None,
+        )
+        name_key = next(
+            (keys_lower[k] for k in [
+                "nome", "name", "campeonato", "league", "descricao"
+            ] if k in keys_lower),
+            None,
+        )
+
+        if id_key is not None or name_key is not None:
+            value_name = obj.get(name_key) if name_key else None
+            value_id = obj.get(id_key) if id_key else None
+
+            if value_name is not None or value_id is not None:
+                results.append({
+                    "caminho": path,
+                    "ID": value_id,
+                    "Nome": value_name,
+                    "objeto": obj,
+                })
+
+        for key, value in obj.items():
+            current = f"{path}.{key}" if path else str(key)
+            results.extend(extract_ids(value, current))
+
+    elif isinstance(obj, list):
+        for i, value in enumerate(obj):
+            results.extend(extract_ids(value, f"{path}[{i}]"))
+
+    return results
 
 # ------------------------------------------------------------
-# 0 — STATUS DO TOKEN
+# CONEXÃO
 # ------------------------------------------------------------
 st.header("0. Conexão")
 
-if not TOKEN:
-    st.error(
-        "Configure a chave nos Secrets do Streamlit antes de testar. "
-        "A chave não precisa ser colocada neste arquivo."
-    )
-else:
+if TOKEN:
     st.success("🔐 Token encontrado nos Secrets.")
+else:
+    st.error("Token não encontrado. Configure o Secret antes de testar.")
 
 # ------------------------------------------------------------
-# 1 — CAMPEONATOS
+# TESTE PRINCIPAL
 # ------------------------------------------------------------
-st.header("1. Campeonatos liberados")
+st.header("1. Resposta REAL de /campeonatos")
 
-if st.button("🏆 Listar campeonatos", type="primary"):
-    data, error = api_get("/campeonatos")
+st.write(
+    "Este teste não tenta adivinhar a estrutura da resposta. "
+    "Ele mostra status, headers relevantes e o JSON bruto."
+)
+
+if st.button("🔎 Consultar /campeonatos", type="primary"):
+    body, status, headers, error = api_get("/campeonatos")
+
+    st.session_state["champ_body"] = body
+    st.session_state["champ_status"] = status
+    st.session_state["champ_headers"] = headers
+    st.session_state["champ_error"] = error
+
+if "champ_status" in st.session_state:
+    status = st.session_state["champ_status"]
+    body = st.session_state["champ_body"]
+    headers = st.session_state["champ_headers"]
+    error = st.session_state["champ_error"]
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("HTTP", status if status is not None else "—")
+    with c2:
+        remaining = headers.get("x-ratelimit-remaining", "—") if headers else "—"
+        st.metric("Rate limit restante", remaining)
 
     if error:
         st.error(error)
+
+    if headers:
+        st.subheader("📡 Headers relevantes")
+        st.json(headers)
+
+    st.subheader("🧬 Tipo da resposta")
+    st.code(type(body).__name__)
+
+    st.subheader("🔍 JSON bruto")
+    st.json(body)
+
+    # --------------------------------------------
+    # Busca recursiva por Série B
+    # --------------------------------------------
+    st.subheader("🇧🇷 Busca automática por Série B")
+
+    matches = walk(body)
+
+    serie_matches = [
+        item for item in matches
+        if "série b" in str(item[1]).lower()
+        or "serie b" in str(item[1]).lower()
+    ]
+
+    if serie_matches:
+        st.success(
+            f"Encontrada(s) {len(serie_matches)} ocorrência(s) "
+            "relacionada(s) à Série B."
+        )
+
+        for path, value in serie_matches:
+            st.write(f"**{path}**")
+            st.write(value)
     else:
-        st.session_state["campeonatos"] = data
-        comps = first_list(data, ["campeonatos", "data", "results"])
+        st.warning(
+            "Nenhuma ocorrência literal de 'Série B' foi encontrada "
+            "no JSON retornado."
+        )
 
-        st.success(f"Resposta recebida. {len(comps)} campeonato(s) listado(s).")
+    # --------------------------------------------
+    # Objetos com ID/Nome
+    # --------------------------------------------
+    st.subheader("🆔 Objetos com ID/Nome encontrados")
 
-        if comps:
-            rows = []
-            for c in comps:
-                rows.append({
-                    "ID": c.get("id"),
-                    "Nome": c.get("nome") or c.get("name"),
-                    "Temporada": c.get("temporada") or c.get("season"),
-                    "País": c.get("pais") or c.get("country"),
-                })
-            st.dataframe(rows, use_container_width=True, hide_index=True)
+    candidates = extract_ids(body)
 
-        show_raw("🔍 JSON — campeonatos", data)
+    if candidates:
+        rows = []
+        seen = set()
 
-# ------------------------------------------------------------
-# 2 — ID DA SÉRIE B
-# ------------------------------------------------------------
-st.header("2. Identificar Série B")
-
-campeonatos = st.session_state.get("campeonatos")
-comps = first_list(campeonatos, ["campeonatos", "data", "results"])
-
-serie_b_ids = []
-if comps:
-    for c in comps:
-        text = " ".join(
-            str(c.get(k) or "")
-            for k in ["nome", "name", "slug", "descricao", "description"]
-        ).lower()
-        if "série b" in text or "serie b" in text:
-            serie_b_ids.append(
-                (str(c.get("id")), c.get("nome") or c.get("name"))
+        for item in candidates:
+            key = (
+                str(item.get("ID")),
+                str(item.get("Nome")),
+                str(item.get("caminho")),
             )
+            if key in seen:
+                continue
+            seen.add(key)
 
-if serie_b_ids:
-    st.success("Série B encontrada na lista.")
-    st.write(serie_b_ids)
+            rows.append({
+                "ID": item.get("ID"),
+                "Nome": item.get("Nome"),
+                "Caminho": item.get("caminho"),
+            })
 
-manual_championship_id = st.text_input(
-    "ID do campeonato Série B (se necessário)",
-    value=serie_b_ids[0][0] if serie_b_ids else "",
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("Nenhum objeto ID/Nome reconhecível foi encontrado.")
+
+# ------------------------------------------------------------
+# TESTE DIRETO POR ID
+# ------------------------------------------------------------
+st.divider()
+st.header("2. Teste direto de campeonato")
+
+st.write(
+    "Depois de identificar o ID da Série B no diagnóstico, "
+    "coloque-o abaixo. Não faremos novas tentativas automáticas."
 )
 
-# ------------------------------------------------------------
-# 3 — FASES
-# ------------------------------------------------------------
-st.header("3. Fases da Série B")
+champ_id = st.text_input(
+    "ID do campeonato",
+    placeholder="Ex.: 10",
+)
 
-if st.button("📚 Carregar fases"):
-    cid = manual_championship_id.strip()
-
-    if not cid:
-        st.warning("Informe o ID da Série B.")
+if st.button("🏆 Consultar campeonato por ID"):
+    if not champ_id.strip():
+        st.warning("Informe um ID.")
     else:
-        data, error = api_get(f"/campeonatos/{cid}/fases")
+        body, status, headers, error = api_get(
+            f"/campeonatos/{champ_id.strip()}"
+        )
+
+        st.write(f"**HTTP:** {status}")
+        if headers:
+            st.json(headers)
 
         if error:
             st.error(error)
         else:
-            st.session_state["fases"] = data
-            phases = first_list(data, ["fases", "data", "results"])
-
-            st.success(f"Resposta recebida. {len(phases)} fase(s).")
-
-            if phases:
-                rows = []
-                for p in phases:
-                    rows.append({
-                        "ID": p.get("id"),
-                        "Nome": p.get("nome") or p.get("name"),
-                        "Status": p.get("status"),
-                    })
-                st.dataframe(rows, use_container_width=True, hide_index=True)
-
-            show_raw("🔍 JSON — fases", data)
+            st.success("Resposta recebida.")
+            st.json(body)
 
 # ------------------------------------------------------------
-# 4 — DETALHE DE UMA FASE
+# TESTE DE FASE POR ID
 # ------------------------------------------------------------
-st.header("4. Detalhe da fase")
-
-fases_data = st.session_state.get("fases")
-phases = first_list(fases_data, ["fases", "data", "results"])
+st.header("3. Teste direto de fase")
 
 phase_id = st.text_input(
     "ID da fase",
-    value=str(phases[0].get("id")) if phases and phases[0].get("id") else "",
+    placeholder="ID retornado pelo campeonato",
 )
 
-if st.button("📋 Consultar fase"):
-    cid = manual_championship_id.strip()
-
-    if not cid or not phase_id.strip():
-        st.warning("Informe campeonato_id e fase_id.")
+if st.button("📚 Consultar fase"):
+    if not champ_id.strip() or not phase_id.strip():
+        st.warning("Informe campeonato ID e fase ID.")
     else:
-        data, error = api_get(
-            f"/campeonatos/{cid}/fases/{phase_id.strip()}"
+        body, status, headers, error = api_get(
+            f"/campeonatos/{champ_id.strip()}/fases/{phase_id.strip()}"
         )
+
+        st.write(f"**HTTP:** {status}")
 
         if error:
             st.error(error)
         else:
-            st.session_state["fase_detail"] = data
-            st.success("✅ Fase carregada.")
-            show_raw("🔍 JSON — detalhe da fase", data)
+            st.success("Fase recebida.")
+            st.json(body)
 
 # ------------------------------------------------------------
-# 5 — PARTIDA
+# TESTE DE PARTIDA
 # ------------------------------------------------------------
-st.header("5. Enriquecimento de uma partida")
-
-st.write(
-    "Cole o ID de uma partida FINALIZADA da Série B. "
-    "O endpoint de partida é o recurso mais rico da API."
-)
+st.header("4. Teste de partida")
 
 fixture_id = st.text_input(
     "ID da partida",
-    value="",
-    placeholder="Ex.: 23447",
+    placeholder="ID de uma partida finalizada da Série B",
 )
 
-if st.button("🔬 Testar partida"):
-    fid = fixture_id.strip()
-
-    if not fid:
+if st.button("🔬 Consultar partida"):
+    if not fixture_id.strip():
         st.warning("Informe o ID da partida.")
-        st.stop()
-
-    data, error = api_get(f"/partidas/{fid}")
-
-    if error:
-        st.error(error)
     else:
-        st.session_state["partida"] = data
-
-        # Tentativa de localizar o objeto principal.
-        partida = data.get("partida", data)
-
-        st.success("✅ Detalhes da partida recebidos.")
-
-        # -------------------------
-        # Resumo
-        # -------------------------
-        st.subheader("⚽ Resumo")
-
-        home = (
-            partida.get("time_mandante")
-            or partida.get("mandante")
-            or partida.get("home_team")
-            or partida.get("home")
-        )
-        away = (
-            partida.get("time_visitante")
-            or partida.get("visitante")
-            or partida.get("away_team")
-            or partida.get("away")
+        body, status, headers, error = api_get(
+            f"/partidas/{fixture_id.strip()}"
         )
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.write("**Casa**")
-            st.write(home if isinstance(home, str) else str(home or "—"))
-        with c2:
-            st.write("**Fora**")
-            st.write(away if isinstance(away, str) else str(away or "—"))
-        with c3:
-            st.write("**ID**")
-            st.write(fid)
+        st.write(f"**HTTP:** {status}")
 
-        # -------------------------
-        # Descoberta automática
-        # -------------------------
-        st.subheader("🧩 Estrutura encontrada")
+        if headers:
+            st.json(headers)
 
-        if isinstance(partida, dict):
-            keys = sorted(partida.keys())
-            st.write(
-                f"**{len(keys)} campos no objeto principal da partida:**"
-            )
-            st.code("\n".join(keys))
+        if error:
+            st.error(error)
+        else:
+            st.success("Partida recebida.")
+            st.json(body)
 
-        # -------------------------
-        # Cobertura
-        # -------------------------
-        st.subheader("📊 Mapa de cobertura")
+            # Campos de interesse encontrados em qualquer nível.
+            found = walk(body)
 
-        aliases = {
-            "Placar": ["placar", "resultado", "score"],
-            "Estatísticas": ["estatisticas", "statistics", "stats"],
-            "Escalações": ["escalacoes", "escalações", "lineups"],
-            "Titulares": ["titulares", "starters"],
-            "Reservas": ["reservas", "substitutes"],
-            "Eventos": ["eventos", "events", "gols", "cartoes", "substituicoes"],
-            "Gols": ["gols", "goals"],
-            "Cartões": ["cartoes", "cartões", "cards"],
-            "Substituições": ["substituicoes", "substituições", "substitutions"],
-            "Jogadores": ["jogadores", "players", "atletas"],
-            "Finalizações": ["finalizacoes", "finalizações", "shots"],
-            "Passes": ["passes"],
-            "Desarmes": ["desarmes", "tackles"],
-            "Posse": ["posse", "possession"],
-            "Escanteios": ["escanteios", "corners"],
-            "Impedimentos": ["impedimentos", "offsides"],
-            "Faltas": ["faltas", "fouls"],
-            "Goleiros": ["goleiros", "goalkeepers", "defesas", "saves"],
-            "xG": ["xg", "expected_goals", "gols_esperados"],
-        }
+            interesting = [
+                item for item in found
+                if any(term in item[0].lower() for term in [
+                    "estat", "escal", "jog", "atlet", "gol",
+                    "cart", "substit", "final", "passe",
+                    "escante", "posse", "falta", "imped",
+                    "goleir", "xg"
+                ])
+            ]
 
-        rows = []
-        lower_keys = {
-            str(k).lower(): k
-            for k in (partida.keys() if isinstance(partida, dict) else [])
-        }
+            if interesting:
+                st.subheader("📊 Campos potencialmente úteis")
+                for path, value in interesting[:200]:
+                    st.write(f"**{path}**")
+                    st.write(value)
 
-        for label, possible in aliases.items():
-            found = []
-            for p in possible:
-                if p.lower() in lower_keys:
-                    found.append(lower_keys[p.lower()])
-
-            rows.append({
-                "Dado": label,
-                "Encontrado": "✅" if found else "❌",
-                "Campo(s)": ", ".join(map(str, found)) if found else "—",
-            })
-
-        st.dataframe(rows, use_container_width=True, hide_index=True)
-
-        # -------------------------
-        # JSON completo
-        # -------------------------
-        show_raw("🔍 JSON bruto — partida", data)
-
-# ------------------------------------------------------------
-# 6 — CHECKLIST FINAL
-# ------------------------------------------------------------
 st.divider()
-st.header("6. Checklist para integração")
-
-st.write(
-    """
-Depois do teste, vamos decidir objetivamente:
-
-1. Qual é o ID da Série B 2026.
-2. Qual é o ID da fase.
-3. Como listar as partidas.
-4. Qual é o ID único de cada partida.
-5. Quais campos de estatística existem.
-6. Se escalações e jogadores estão completos.
-7. Se eventos estão completos.
-8. Quais métricas podem alimentar o histórico dos times.
-9. Quais métricas podem alimentar o histórico dos jogadores.
-10. Quais campos podem ser usados para validação cruzada com outras fontes.
-"""
-)
-
 st.info(
-    "Não coloque sua API Key neste arquivo nem no chat. "
-    "Use o Secrets do Streamlit."
+    "Esta versão é somente diagnóstico. Depois de descobrirmos a estrutura "
+    "real da API, fazemos o laboratório de cobertura e só então a integração "
+    "ao Premium."
 )
