@@ -10,36 +10,80 @@ st.title("🧪 Laboratório API Futebol")
 st.caption("Série B — teste independente antes da integração ao Premium")
 
 
+def _normalize_token(value):
+    """Normaliza o token sem exibi-lo e evita enviar 'Bearer Bearer ...'."""
+    if value is None:
+        return None
+    try:
+        token = str(value).strip()
+    except Exception:
+        return None
+    if not token:
+        return None
+
+    # Aceita token salvo como texto simples ou já com o prefixo Bearer.
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+
+    # Remove aspas que podem ter sido coladas acidentalmente no Secret.
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {"\"", "'"}:
+        token = token[1:-1].strip()
+
+    return token or None
+
+
 def get_token():
+    # Formato recomendado no Streamlit Secrets:
+    # [api_futebol]
+    # token = "..."
     try:
         if "api_futebol" in st.secrets:
             value = st.secrets["api_futebol"]
-            if isinstance(value, dict):
-                return value.get("token")
-            return value
+            if hasattr(value, "get"):
+                token = value.get("token")
+                if token:
+                    return _normalize_token(token), "api_futebol.token"
+            else:
+                token = _normalize_token(value)
+                if token:
+                    return token, "api_futebol"
     except Exception:
         pass
+
+    # Formato alternativo:
+    # API_FUTEBOL_TOKEN = "..."
     try:
-        return st.secrets.get("API_FUTEBOL_TOKEN")
+        token = _normalize_token(st.secrets.get("API_FUTEBOL_TOKEN"))
+        if token:
+            return token, "API_FUTEBOL_TOKEN"
     except Exception:
-        return None
+        pass
+
+    return None, None
 
 
-TOKEN = get_token()
+TOKEN, TOKEN_SOURCE = get_token()
 
 
 def api_get(path, params=None):
     if not TOKEN:
-        return None, "API_FUTEBOL_TOKEN não configurado nos Secrets."
+        return None, "API-Futebol: token não configurado nos Secrets."
     try:
         response = requests.get(
             BASE_URL + path,
             params=params or {},
-            headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"},
+            headers={
+                "Authorization": f"Bearer {TOKEN}",
+                "Accept": "application/json",
+            },
             timeout=20,
         )
         if response.status_code == 401:
-            return None, "HTTP 401 — token inválido ou não autorizado."
+            return None, (
+                "HTTP 401 — a API recusou o token. "
+                "Verifique o Secret no Streamlit Cloud: o valor deve ser o token puro "
+                "(com ou sem 'Bearer', pois o laboratório normaliza automaticamente)."
+            )
         if response.status_code == 403:
             return None, "HTTP 403 — acesso negado/plano não liberou este recurso."
         if response.status_code == 429:
@@ -80,7 +124,8 @@ st.header("0. Conexão")
 if not TOKEN:
     st.error("Configure a chave nos Secrets do Streamlit antes de testar. A chave não precisa ser colocada neste arquivo.")
 else:
-    st.success("🔐 Token encontrado nos Secrets.")
+    st.success(f"🔐 Token encontrado nos Secrets ({TOKEN_SOURCE}).")
+    st.caption("O prefixo Bearer é aplicado automaticamente e o valor do token nunca é exibido.")
 
 
 st.header("1. Campeonatos liberados")
