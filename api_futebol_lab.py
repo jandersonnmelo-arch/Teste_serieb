@@ -10,48 +10,98 @@ st.title("🧪 Laboratório API Futebol")
 st.caption("Série B — teste independente antes da integração ao Premium")
 
 
-def get_token():
+def get_token_candidates():
+    """Lê os formatos de Secret que já usamos, sem alterar o token."""
+    candidates = []
+
     try:
         if "api_futebol" in st.secrets:
             value = st.secrets["api_futebol"]
             if isinstance(value, dict):
-                return value.get("token")
-            return value
+                token = value.get("token")
+                if token:
+                    candidates.append((str(token), "api_futebol.token"))
+            elif value:
+                candidates.append((str(value), "api_futebol"))
     except Exception:
         pass
+
     try:
-        return st.secrets.get("API_FUTEBOL_TOKEN")
+        token = st.secrets.get("API_FUTEBOL_TOKEN")
+        if token:
+            candidates.append((str(token), "API_FUTEBOL_TOKEN"))
     except Exception:
-        return None
+        pass
+
+    # Remove duplicatas sem alterar o conteúdo do token.
+    unique = []
+    seen = set()
+    for token, source in candidates:
+        if token not in seen:
+            unique.append((token, source))
+            seen.add(token)
+    return unique
 
 
-TOKEN = get_token()
+TOKEN_CANDIDATES = get_token_candidates()
+TOKEN = TOKEN_CANDIDATES[0][0] if TOKEN_CANDIDATES else None
+TOKEN_SOURCE = TOKEN_CANDIDATES[0][1] if TOKEN_CANDIDATES else None
+
+
+def masked_token(token):
+    """Exibe apenas os últimos 4 caracteres para diagnóstico seguro."""
+    if not token:
+        return "não configurado"
+    text = str(token)
+    if len(text) <= 4:
+        return "*" * len(text)
+    return "*" * max(8, len(text) - 4) + text[-4:]
 
 
 def api_get(path, params=None):
-    if not TOKEN:
-        return None, "API_FUTEBOL_TOKEN não configurado nos Secrets."
-    try:
-        response = requests.get(
-            BASE_URL + path,
-            params=params or {},
-            headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"},
-            timeout=20,
-        )
-        if response.status_code == 401:
-            return None, "HTTP 401 — token inválido ou não autorizado."
-        if response.status_code == 403:
-            return None, "HTTP 403 — acesso negado/plano não liberou este recurso."
-        if response.status_code == 429:
-            return None, "HTTP 429 — limite de requisições atingido."
-        if not response.ok:
-            return None, f"HTTP {response.status_code}: {response.text[:800]}"
+    if not TOKEN_CANDIDATES:
+        return None, "API-Futebol: token não configurado nos Secrets."
+
+    last_401 = None
+
+    for token, source in TOKEN_CANDIDATES:
         try:
-            return response.json(), None
-        except Exception:
-            return None, "Resposta não-JSON."
-    except Exception as exc:
-        return None, str(exc)
+            response = requests.get(
+                BASE_URL + path,
+                params=params or {},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+                timeout=20,
+            )
+
+            if response.status_code == 401:
+                last_401 = source
+                # Se houver dois formatos de Secret configurados, tenta o
+                # próximo sem alterar nenhum deles.
+                continue
+
+            if response.status_code == 403:
+                return None, "HTTP 403 — acesso negado/plano não liberou este recurso."
+            if response.status_code == 429:
+                return None, "HTTP 429 — limite de requisições atingido."
+            if not response.ok:
+                return None, f"HTTP {response.status_code}: {response.text[:800]}"
+
+            try:
+                return response.json(), None
+            except Exception:
+                return None, "Resposta não-JSON."
+
+        except Exception as exc:
+            return None, str(exc)
+
+    return None, (
+        "HTTP 401 — a API recusou o(s) token(s) configurado(s). "
+        f"Última origem testada: {last_401 or 'desconhecida'}. "
+        "A aplicação preservou o token exatamente como está nos Secrets."
+    )
 
 
 def first_list(data, keys):
@@ -63,7 +113,8 @@ def first_list(data, keys):
             if isinstance(value, list):
                 return value
         numeric_values = [
-            value for key, value in data.items()
+            value
+            for key, value in data.items()
             if str(key).isdigit() and isinstance(value, dict)
         ]
         if numeric_values:
@@ -77,10 +128,11 @@ def show_raw(title, data):
 
 
 st.header("0. Conexão")
-if not TOKEN:
+if not TOKEN_CANDIDATES:
     st.error("Configure a chave nos Secrets do Streamlit antes de testar. A chave não precisa ser colocada neste arquivo.")
 else:
-    st.success("🔐 Token encontrado nos Secrets.")
+    st.success(f"🔐 Token encontrado nos Secrets ({TOKEN_SOURCE}).")
+    st.caption(f"Diagnóstico: {len(TOKEN_CANDIDATES)} token(s) encontrado(s); valor oculto: {masked_token(TOKEN)}")
 
 
 st.header("1. Campeonatos liberados")
