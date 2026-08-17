@@ -3,6 +3,9 @@ import streamlit as st
 
 from diagnostico_fase import render_fase_diagnostic, render_partida_raiox
 
+# A função render_partida_raiox está no diagnostico_fase.py.
+# Este laboratório continua isolado do Premium e sem chamadas extras para o raio-X.
+
 BASE_URL = "https://api.api-futebol.com.br/v1"
 
 st.set_page_config(
