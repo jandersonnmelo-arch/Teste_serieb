@@ -11,13 +11,16 @@ st.caption("Série B — teste independente antes da integração ao Premium")
 
 
 def get_token_candidates():
-    """Lê os formatos de Secret que já usamos, sem alterar o token."""
+    """Lê os formatos de Secret sem transformar um bloco TOML em string."""
     candidates = []
 
     try:
         if "api_futebol" in st.secrets:
             value = st.secrets["api_futebol"]
-            if isinstance(value, dict):
+
+            # st.secrets pode devolver um objeto de mapeamento que não é
+            # exatamente um dict Python. O teste correto é possuir `.get`.
+            if hasattr(value, "get"):
                 token = value.get("token")
                 if token:
                     candidates.append((str(token), "api_futebol.token"))
