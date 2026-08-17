@@ -78,167 +78,51 @@ def api_get(path, params=None):
 
 def first_list(data, keys):
     """Extrai listas de respostas em formatos diferentes da API."""
-    if not isinstance(data, dict):
-        return []
+    if isinstance(data, list):
+        return data
 
-    # Formatos tradicionais: {"data": [...]} / {"results": [...]} etc.
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, list):
-            return value
+    if isinstance(data, dict):
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
 
-    # A API Futebol pode devolver coleções indexadas por chave numérica:
-    # {
-    #   "0": {...},
-    #   "1": {...},
-    #   "9": {
-    #       "campeonato_id": 14,
-    #       "nome": "Campeonato Brasileiro Série B",
-    #       ...
-    #   }
-    # }
-    numeric_items = []
-    for key, value in data.items():
-        try:
-            int(str(key))
-        except (TypeError, ValueError):
-            continue
-
-        if isinstance(value, dict):
-            numeric_items.append((int(str(key)), value))
-
-    if numeric_items:
-        numeric_items.sort(key=lambda item: item[0])
-        return [value for _, value in numeric_items]
-
-    # Alguns retornos podem ser um único objeto de campeonato/fase.
-    if any(
-        k in data
-        for k in (
-            "campeonato_id",
-            "edicao_id",
-            "fase_id",
-            "partida_id",
-        )
-    ):
-        return [data]
+        numeric_values = [
+            value for key, value in data.items()
+            if str(key).isdigit() and isinstance(value, dict)
+        ]
+        if numeric_values:
+            return numeric_values
 
     return []
 
-def show_raw(label, data):
-    with st.expander(label):
-        st.json(data if data is not None else {})
-
-
-def walk_json(value, path="$", rows=None):
-    """Percorre recursivamente o JSON e registra todos os caminhos."""
-    if rows is None:
-        rows = []
-
-    if isinstance(value, dict):
-        if not value:
-            rows.append({
-                "Caminho": path,
-                "Tipo": "objeto vazio",
-                "Valor/Quantidade": "0 campos",
-            })
-        else:
-            rows.append({
-                "Caminho": path,
-                "Tipo": "objeto",
-                "Valor/Quantidade": f"{len(value)} campos",
-            })
-            for key, child in value.items():
-                walk_json(child, f"{path}.{key}", rows)
-
-    elif isinstance(value, list):
-        rows.append({
-            "Caminho": path,
-            "Tipo": "lista",
-            "Valor/Quantidade": f"{len(value)} item(ns)",
-        })
-        # Mostra a estrutura do primeiro item sem gerar uma tabela gigantesca.
-        if value:
-            walk_json(value[0], f"{path}[0]", rows)
-
-    else:
-        preview = str(value)
-        if len(preview) > 160:
-            preview = preview[:157] + "..."
-        rows.append({
-            "Caminho": path,
-            "Tipo": type(value).__name__,
-            "Valor/Quantidade": preview,
-        })
-
-    return rows
-
-
-def find_keys_deep(value, wanted=None, path="$", found=None):
-    """Procura campos relevantes em qualquer nível do JSON."""
-    if wanted is None:
-        wanted = {
-            "jogador", "jogadores", "atleta", "atletas", "player", "players",
-            "escalacao", "escalacoes", "titular", "titulares", "reserva", "reservas",
-            "evento", "eventos", "gol", "gols", "cartao", "cartoes",
-            "substituicao", "substituicoes", "estatistica", "estatisticas",
-            "finalizacao", "finalizacoes", "chutes", "shots",
-            "passes", "desarmes", "posse", "escanteios", "corners",
-            "impedimentos", "faltas", "goleiro", "defesas", "saves",
-            "xg", "expected_goals", "placar", "resultado",
-        }
-
-    if found is None:
-        found = []
-
-    if isinstance(value, dict):
-        for key, child in value.items():
-            key_norm = str(key).strip().lower()
-            if key_norm in wanted:
-                found.append({
-                    "Campo": str(key),
-                    "Caminho": path,
-                    "Tipo": type(child).__name__,
-                    "Quantidade": len(child) if isinstance(child, (list, dict)) else "—",
-                })
-            find_keys_deep(child, wanted, f"{path}.{key}", found)
-
-    elif isinstance(value, list):
-        for i, child in enumerate(value[:5]):
-            find_keys_deep(child, wanted, f"{path}[{i}]", found)
-
-    return found
-
+def show_raw(title, data):
+    with st.expander(title):
+        st.json(data)
 
 def extract_player_candidates(value, path="$", rows=None):
-    """Localiza objetos que parecem representar jogadores/atletas."""
     if rows is None:
         rows = []
 
     if isinstance(value, dict):
-        keys = {str(k).lower() for k in value.keys()}
-        player_markers = {
-            "jogador", "atleta", "player", "jogador_id",
-            "atleta_id", "player_id", "nome_jogador", "nome_atleta"
-        }
+        text = " ".join(
+            str(value.get(k) or "")
+            for k in [
+                "nome", "name", "nome_completo", "full_name",
+                "jogador", "player", "atleta"
+            ]
+        ).strip()
 
-        if keys.intersection(player_markers) or (
-            "nome" in keys and (
-                "numero" in keys or "camisa" in keys or
-                "posicao" in keys or "posição" in keys
-            )
-        ):
+        if text:
             rows.append({
-                "Caminho": path,
-                "Campos": ", ".join(map(str, value.keys())),
-                "Nome possível": (
-                    value.get("nome")
-                    or value.get("nome_jogador")
-                    or value.get("nome_atleta")
-                    or value.get("player")
-                    or value.get("jogador")
-                    or value.get("atleta")
-                    or "—"
+                "caminho": path,
+                "nome": text,
+                "id": (
+                    value.get("id")
+                    or value.get("jogador_id")
+                    or value.get("player_id")
+                    or value.get("atleta_id")
+                    or ""
                 ),
             })
 
@@ -250,7 +134,6 @@ def extract_player_candidates(value, path="$", rows=None):
             extract_player_candidates(child, f"{path}[{i}]", rows)
 
     return rows
-
 
 # ------------------------------------------------------------
 # 0 — STATUS DO TOKEN
@@ -421,6 +304,28 @@ if st.button("📋 Consultar fase"):
             show_raw("🔍 JSON — detalhe da fase", data)
 
 # ------------------------------------------------------------
+# 4B — DIAGNÓSTICO DA FASE
+# ------------------------------------------------------------
+st.header("4B. Diagnóstico das partidas da fase")
+
+st.caption(
+    "Abre o diagnóstico usando somente o JSON da fase já carregado. "
+    "Esta ação não faz nenhuma requisição adicional à API-Futebol."
+)
+
+st.page_link(
+    "pages/5_Diagnostico_Fase.py",
+    label="📊 Abrir Diagnóstico da Fase — Série B",
+    icon="📊",
+)
+
+if st.session_state.get("fase_detail") is not None:
+    st.success(
+        "Fase disponível na sessão. Você pode abrir o diagnóstico agora, "
+        "sem consumir outra requisição da API."
+    )
+
+# ------------------------------------------------------------
 # 5 — PARTIDA
 # ------------------------------------------------------------
 st.header("5. Enriquecimento de uma partida")
@@ -450,14 +355,10 @@ if st.button("🔬 Testar partida"):
     else:
         st.session_state["partida"] = data
 
-        # Tentativa de localizar o objeto principal.
         partida = data.get("partida", data)
 
         st.success("✅ Detalhes da partida recebidos.")
 
-        # -------------------------
-        # Resumo
-        # -------------------------
         st.subheader("⚽ Resumo")
 
         home = (
@@ -484,9 +385,6 @@ if st.button("🔬 Testar partida"):
             st.write("**ID**")
             st.write(fid)
 
-        # -------------------------
-        # Descoberta automática
-        # -------------------------
         st.subheader("🧩 Estrutura encontrada")
 
         if isinstance(partida, dict):
@@ -496,170 +394,11 @@ if st.button("🔬 Testar partida"):
             )
             st.code("\n".join(keys))
 
-        # -------------------------
-        # Cobertura
-        # -------------------------
-        st.subheader("📊 Mapa de cobertura")
+        st.subheader("🔎 Raio-X completo")
 
-        aliases = {
-            "Placar": ["placar", "resultado", "score"],
-            "Estatísticas": ["estatisticas", "statistics", "stats"],
-            "Escalações": ["escalacoes", "escalações", "lineups"],
-            "Titulares": ["titulares", "starters"],
-            "Reservas": ["reservas", "substitutes"],
-            "Eventos": ["eventos", "events", "gols", "cartoes", "substituicoes"],
-            "Gols": ["gols", "goals"],
-            "Cartões": ["cartoes", "cartões", "cards"],
-            "Substituições": ["substituicoes", "substituições", "substitutions"],
-            "Jogadores": ["jogadores", "players", "atletas"],
-            "Finalizações": ["finalizacoes", "finalizações", "shots"],
-            "Passes": ["passes"],
-            "Desarmes": ["desarmes", "tackles"],
-            "Posse": ["posse", "possession"],
-            "Escanteios": ["escanteios", "corners"],
-            "Impedimentos": ["impedimentos", "offsides"],
-            "Faltas": ["faltas", "fouls"],
-            "Goleiros": ["goleiros", "goalkeepers", "defesas", "saves"],
-            "xG": ["xg", "expected_goals", "gols_esperados"],
-        }
-
-        rows = []
-        lower_keys = {
-            str(k).lower(): k
-            for k in (partida.keys() if isinstance(partida, dict) else [])
-        }
-
-        for label, possible in aliases.items():
-            found = []
-            for p in possible:
-                if p.lower() in lower_keys:
-                    found.append(lower_keys[p.lower()])
-
-            rows.append({
-                "Dado": label,
-                "Encontrado": "✅" if found else "❌",
-                "Campo(s)": ", ".join(map(str, found)) if found else "—",
-            })
-
-        st.dataframe(rows, use_container_width=True, hide_index=True)
-
-        # -------------------------
-        # JSON completo
-        # -------------------------
-        show_raw("🔍 JSON bruto — partida", data)
-
-        # -------------------------
-        # RAIO-X RECURSIVO — sem nova chamada à API
-        # -------------------------
-        st.subheader("🧬 Raio-X completo do retorno")
-
-        st.caption(
-            "Esta seção analisa o mesmo JSON já recebido. "
-            "Ela não faz nenhuma chamada adicional à API."
+        st.write(
+            "A análise abaixo percorre apenas o JSON já recebido e " 
+            "não faz novas chamadas à API."
         )
 
-        deep_rows = walk_json(data)
-        st.metric("Nós/caminhos inspecionados", len(deep_rows))
-
-        with st.expander("📂 Todos os caminhos encontrados"):
-            st.dataframe(
-                deep_rows,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        st.subheader("🎯 Campos relevantes encontrados em qualquer nível")
-
-        relevant_rows = find_keys_deep(data)
-
-        if relevant_rows:
-            # Remove duplicidades exatas para deixar o diagnóstico legível.
-            seen = set()
-            unique_rows = []
-            for row in relevant_rows:
-                key = (
-                    row["Campo"],
-                    row["Caminho"],
-                    row["Tipo"],
-                    str(row["Quantidade"]),
-                )
-                if key not in seen:
-                    seen.add(key)
-                    unique_rows.append(row)
-
-            st.success(
-                f"Encontrados {len(unique_rows)} campo(s)/estrutura(s) "
-                "potencialmente úteis."
-            )
-            st.dataframe(
-                unique_rows,
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.warning(
-                "Nenhum dos campos relevantes foi encontrado pelo diagnóstico "
-                "automático."
-            )
-
-        st.subheader("👤 Candidatos a jogadores/atletas")
-
-        player_rows = extract_player_candidates(data)
-
-        if player_rows:
-            # Deduplicação por caminho.
-            seen_paths = set()
-            unique_players = []
-            for row in player_rows:
-                if row["Caminho"] not in seen_paths:
-                    seen_paths.add(row["Caminho"])
-                    unique_players.append(row)
-
-            st.success(
-                f"{len(unique_players)} estrutura(s) parecem representar "
-                "jogadores/atletas."
-            )
-            st.dataframe(
-                unique_players,
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.warning(
-                "Nenhuma estrutura claramente identificável como jogador/atleta "
-                "foi encontrada neste retorno."
-            )
-
-        st.info(
-            "Importante: este teste mede o que a API devolveu nesta partida "
-            "específica. Um campo ausente aqui não significa necessariamente "
-            "que a API nunca forneça esse campo em outras partidas."
-        )
-
-# ------------------------------------------------------------
-# 6 — CHECKLIST FINAL
-# ------------------------------------------------------------
-st.divider()
-st.header("6. Checklist para integração")
-
-st.write(
-    """
-Depois do teste, vamos decidir objetivamente:
-
-1. Qual é o ID da Série B 2026.
-2. Qual é o ID da fase.
-3. Como listar as partidas.
-4. Qual é o ID único de cada partida.
-5. Quais campos de estatística existem.
-6. Se escalações e jogadores estão completos.
-7. Se eventos estão completos.
-8. Quais métricas podem alimentar o histórico dos times.
-9. Quais métricas podem alimentar o histórico dos jogadores.
-10. Quais campos podem ser usados para validação cruzada com outras fontes.
-"""
-)
-
-st.info(
-    "Não coloque sua API Key neste arquivo nem no chat. "
-    "Use o Secrets do Streamlit."
-)
+        show_raw("🔍 JSON — detalhe completo da partida", data)
