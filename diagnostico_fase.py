@@ -1,138 +1,126 @@
+import re
 import streamlit as st
 
 
-MATCH_KEYS = {
-    "partidas", "partida", "jogos", "jogo", "matches", "match", "games", "game",
-    "fixtures", "fixture", "confrontos", "confronto"
-}
+MATCH_ID_KEYS = (
+    "partida_id", "id_partida", "id", "match_id", "fixture_id"
+)
+
+HOME_KEYS = (
+    "time_mandante", "mandante", "home_team", "home", "time_casa"
+)
+
+AWAY_KEYS = (
+    "time_visitante", "visitante", "away_team", "away", "time_fora"
+)
+
+ROUND_KEYS = (
+    "rodada", "round", "numero_rodada", "rodada_numero"
+)
+
+DATE_KEYS = (
+    "data", "date", "data_hora", "horario", "datetime"
+)
+
+STATUS_KEYS = ("status", "situacao", "estado")
+SCORE_KEYS = ("placar", "resultado", "score")
 
 
-def _walk(value, path="$", rows=None):
-    if rows is None:
-        rows = []
+def _get_first(d, keys):
+    if not isinstance(d, dict):
+        return None
+    for key in keys:
+        value = d.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _name(value):
+    if isinstance(value, str):
+        return value
     if isinstance(value, dict):
-        for key, child in value.items():
-            p = f"{path}.{key}"
-            rows.append({
-                "Caminho": p,
-                "Tipo": type(child).__name__,
-                "Quantidade": len(child) if isinstance(child, (dict, list)) else "—",
-            })
-            _walk(child, p, rows)
-    elif isinstance(value, list):
-        for i, child in enumerate(value):
-            _walk(child, f"{path}[{i}]", rows)
-    return rows
+        for key in ("nome", "name", "nome_popular", "short_name", "apelido"):
+            if value.get(key):
+                return value[key]
+    return value
 
 
-def _looks_like_match(obj):
-    """Detecta uma partida sem depender do nome exato do campo da API."""
-    if not isinstance(obj, dict):
+def _looks_like_match(value):
+    """Reconhece uma partida mesmo quando ela está dentro de um dict indexado."""
+    if not isinstance(value, dict):
         return False
 
-    keys = {str(k).lower() for k in obj.keys()}
+    keys = {str(k).lower() for k in value.keys()}
 
-    explicit_id = keys & {
-        "partida_id", "id_partida", "match_id", "fixture_id", "jogo_id", "confronto_id"
-    }
+    has_id = any(k in keys for k in MATCH_ID_KEYS)
+    has_home = any(k in keys for k in HOME_KEYS)
+    has_away = any(k in keys for k in AWAY_KEYS)
+    has_score = any(k in keys for k in SCORE_KEYS)
+    has_date = any(k in keys for k in DATE_KEYS)
 
-    home = keys & {
-        "mandante", "time_mandante", "equipe_mandante", "home", "home_team",
-        "time_casa", "equipe_casa"
-    }
-    away = keys & {
-        "visitante", "time_visitante", "equipe_visitante", "away", "away_team",
-        "time_fora", "equipe_fora"
-    }
-
-    date_or_status = keys & {
-        "data", "data_hora", "datetime", "date", "status", "situacao",
-        "inicio", "horario"
-    }
-
-    return bool(explicit_id or (home and away) or ((home or away) and date_or_status))
+    # A API pode variar os campos. Dois sinais fortes já bastam.
+    strong = int(has_home) + int(has_away) + int(has_score) + int(has_date)
+    return has_id and strong >= 2
 
 
-def _find_matches(value, path="$", out=None):
-    """Localiza partidas em listas, dicionários indexados e estruturas aninhadas."""
+def _match_id(value):
+    raw = _get_first(value, MATCH_ID_KEYS)
+    if isinstance(raw, dict):
+        raw = raw.get("id") or raw.get("partida_id")
+    return raw
+
+
+def _walk_matches(value, path="$", out=None, seen_paths=None):
+    """Percorre listas e dicionários, inclusive coleções indexadas por '0','1',..."""
     if out is None:
         out = []
+    if seen_paths is None:
+        seen_paths = set()
 
     if isinstance(value, dict):
-        # O próprio objeto pode ser uma partida.
         if _looks_like_match(value):
-            out.append((path, value))
+            pid = _match_id(value)
+            fingerprint = (str(pid), path) if pid is not None else (None, path)
+            if fingerprint not in seen_paths:
+                seen_paths.add(fingerprint)
+                item = dict(value)
+                item["__path"] = path
+                out.append(item)
+            # Ainda percorremos os filhos para encontrar estruturas adicionais.
 
         for key, child in value.items():
-            key_lower = str(key).lower()
             child_path = f"{path}.{key}"
-
-            # A API pode devolver partidas como lista, objeto indexado por IDs,
-            # ou diretamente como um objeto único.
-            if key_lower in MATCH_KEYS:
-                if isinstance(child, list):
-                    for i, item in enumerate(child):
-                        _find_matches(item, f"{child_path}[{i}]", out)
-                elif isinstance(child, dict):
-                    _find_matches(child, child_path, out)
-                continue
-
-            _find_matches(child, child_path, out)
+            _walk_matches(child, child_path, out, seen_paths)
 
     elif isinstance(value, list):
         for i, child in enumerate(value):
-            _find_matches(child, f"{path}[{i}]", out)
+            _walk_matches(child, f"{path}[{i}]", out, seen_paths)
 
     return out
 
 
-def _value(obj, *names):
-    for name in names:
-        if name in obj and obj[name] not in (None, "", []):
-            return obj[name]
-    return None
+def _find_matches(value):
+    matches = _walk_matches(value)
+
+    # Deduplicação final por ID, mantendo a primeira ocorrência.
+    unique = {}
+    anonymous = []
+    for item in matches:
+        pid = _match_id(item)
+        if pid is None:
+            anonymous.append(item)
+        else:
+            unique.setdefault(str(pid), item)
+    return list(unique.values()) + anonymous
 
 
-def _team_name(value):
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return _value(value, "nome", "name", "nome_popular", "short_name") or str(value)
-    return value
-
-
-def _extract_row(path, p):
-    pid = _value(
-        p,
-        "partida_id", "id_partida", "match_id", "fixture_id", "jogo_id", "confronto_id", "id"
-    )
-
-    home = _value(
-        p, "mandante", "time_mandante", "equipe_mandante", "home_team", "home",
-        "time_casa", "equipe_casa"
-    )
-    away = _value(
-        p, "visitante", "time_visitante", "equipe_visitante", "away_team", "away",
-        "time_fora", "equipe_fora"
-    )
-
-    score = _value(p, "placar", "resultado", "score")
-    if isinstance(score, dict):
-        score = (
-            f"{_value(score, 'mandante', 'home', 'casa', 'home_score') or '—'} x "
-            f"{_value(score, 'visitante', 'away', 'fora', 'away_score') or '—'}"
-        )
-
-    return {
-        "ID": pid if pid is not None else "—",
-        "Rodada": _value(p, "rodada", "round", "numero_rodada", "round_number") or "—",
-        "Data": _value(p, "data", "date", "data_hora", "datetime", "inicio", "horario") or "—",
-        "Mandante": _team_name(home) if home is not None else "—",
-        "Visitante": _team_name(away) if away is not None else "—",
-        "Placar": score if score is not None else "—",
-        "Status": _value(p, "status", "situacao", "estado") or "—",
-        "Caminho no JSON": path,
-    }
+def _value_text(value):
+    if value is None:
+        return "—"
+    if isinstance(value, (dict, list)):
+        return str(value)
+    return str(value)
 
 
 def render_fase_diagnostic(data):
@@ -140,50 +128,69 @@ def render_fase_diagnostic(data):
         st.info("Nenhum detalhe de fase carregado ainda.")
         return
 
-    found = _find_matches(data)
-
-    # Deduplicação. Quando não há ID, o caminho no JSON mantém a partida única.
-    unique = {}
-    for path, p in found:
-        pid = _value(
-            p, "partida_id", "id_partida", "match_id", "fixture_id", "jogo_id", "confronto_id", "id"
-        )
-        key = f"id:{pid}" if pid is not None else f"path:{path}"
-        unique[key] = (path, p)
-
-    found = list(unique.values())
+    partidas = _find_matches(data)
 
     st.subheader("5. Diagnóstico das partidas da fase")
-    st.caption("Análise do JSON já recebido — esta seção não faz nenhuma requisição à API.")
-    st.metric("Partidas encontradas", len(found))
+    st.caption(
+        "Análise do JSON já recebido — esta seção não faz nenhuma requisição à API."
+    )
+    st.metric("Partidas encontradas", len(partidas))
 
-    if not found:
-        st.warning("Não foi localizada uma estrutura de partida no retorno da fase.")
-        st.write("**Estrutura recebida — caminhos relevantes encontrados:**")
-        paths = _walk(data)
-        relevant = [
-            row for row in paths
-            if any(term in row["Caminho"].lower() for term in MATCH_KEYS)
-        ]
-        if relevant:
-            st.dataframe(relevant[:200], use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhuma chave com nome típico de partidas foi encontrada. O formato da resposta precisa ser mapeado antes do próximo teste.")
+    if not partidas:
+        st.warning("Não foi localizada uma partida no retorno da fase.")
+        st.info(
+            "O extrator agora também percorre objetos indexados numericamente. "
+            "Se continuar em 0, será necessário inspecionar o formato exato do JSON recebido."
+        )
         return
 
-    rows = [_extract_row(path, p) for path, p in found]
+    rows = []
+    for p in partidas:
+        home = _name(_get_first(p, HOME_KEYS))
+        away = _name(_get_first(p, AWAY_KEYS))
+        score = _get_first(p, SCORE_KEYS)
+        rodada = _get_first(p, ROUND_KEYS)
+        data_jogo = _get_first(p, DATE_KEYS)
+        status = _get_first(p, STATUS_KEYS)
+        pid = _match_id(p)
+
+        rows.append({
+            "ID": _value_text(pid),
+            "Rodada": _value_text(rodada),
+            "Data": _value_text(data_jogo),
+            "Mandante": _value_text(home),
+            "Visitante": _value_text(away),
+            "Placar": _value_text(score),
+            "Status": _value_text(status),
+            "Caminho no JSON": p.get("__path", "—"),
+        })
+
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
     rodada_counts = {}
     for row in rows:
-        rodada = str(row["Rodada"])
-        rodada_counts[rodada] = rodada_counts.get(rodada, 0) + 1
+        key = row["Rodada"]
+        rodada_counts[key] = rodada_counts.get(key, 0) + 1
 
     st.subheader("📅 Partidas por rodada")
     st.dataframe(
-        [{"Rodada": k, "Partidas": v} for k, v in sorted(rodada_counts.items(), key=lambda x: x[0])],
+        [
+            {"Rodada": rodada, "Partidas": quantidade}
+            for rodada, quantidade in sorted(
+                rodada_counts.items(),
+                key=lambda item: str(item[0]),
+            )
+        ],
         use_container_width=True,
         hide_index=True,
     )
 
-    st.caption("O caminho do JSON é exibido para podermos confirmar exatamente onde a API-Futebol está entregando cada partida.")
+    finished_tokens = {
+        "finalizado", "finalizada", "encerrado", "encerrada", "finished", "completed"
+    }
+    finished = sum(
+        str(row["Status"]).strip().lower() in finished_tokens
+        for row in rows
+    )
+    if finished:
+        st.success(f"🏁 Partidas finalizadas identificadas: {finished}")
